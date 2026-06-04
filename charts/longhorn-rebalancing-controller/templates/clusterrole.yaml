@@ -15,5 +15,8 @@ rules:
     resources: ["volumes"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]

@@ -13,11 +13,12 @@ var (
 )
 
 func addKnownTypes(s *runtime.Scheme) error {
-	s.AddKnownTypes(GroupVersion,
-		&LonghornNode{}, &LonghornNodeList{},
-		&LonghornReplica{}, &LonghornReplicaList{},
-		&LonghornVolume{}, &LonghornVolumeList{},
-	)
+	s.AddKnownTypeWithName(GroupVersion.WithKind("Node"), &LonghornNode{})
+	s.AddKnownTypeWithName(GroupVersion.WithKind("NodeList"), &LonghornNodeList{})
+	s.AddKnownTypeWithName(GroupVersion.WithKind("Replica"), &LonghornReplica{})
+	s.AddKnownTypeWithName(GroupVersion.WithKind("ReplicaList"), &LonghornReplicaList{})
+	s.AddKnownTypeWithName(GroupVersion.WithKind("Volume"), &LonghornVolume{})
+	s.AddKnownTypeWithName(GroupVersion.WithKind("VolumeList"), &LonghornVolumeList{})
 	metav1.AddToGroupVersion(s, GroupVersion)
 	return nil
 }
