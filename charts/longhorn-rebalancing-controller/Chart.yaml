@@ -2,5 +2,5 @@ apiVersion: v2
 name: longhorn-rebalancing-controller
 description: Size-aware Longhorn replica rebalancer — evicts over-placed replicas so Longhorn rebuilds them on less-loaded nodes
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.1.1
+appVersion: "0.1.1"
