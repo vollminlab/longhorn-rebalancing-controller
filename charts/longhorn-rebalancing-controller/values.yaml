@@ -1,0 +1,35 @@
+image:
+  repository: harbor.vollminlab.com/vollminlab/longhorn-rebalancing-controller
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Always deploy into longhorn-system so the controller has pod-level access
+# to Longhorn resources without cross-namespace network policy headaches.
+namespace: longhorn-system
+
+config:
+  dryRun: true
+  rebalance:
+    nodeUsageThreshold: 75
+    maxEvictionsPerDay: 2
+    cooldownMinutes: 30
+    maintenanceWindow: "02:00-05:00"
+    smallestFirst: true
+    graduateAfterCycles: 3
+  steadyState:
+    imbalanceRatio: 1.5
+    maxEvictionsPerDay: 5
+    cooldownMinutes: 10
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 64Mi
+  requests:
+    cpu: 10m
+    memory: 32Mi
+
+nameOverride: ""
+fullnameOverride: ""

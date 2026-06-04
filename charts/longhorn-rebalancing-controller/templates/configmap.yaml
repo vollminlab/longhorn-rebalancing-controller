@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "longhorn-rebalancing-controller.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "longhorn-rebalancing-controller.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    dryRun: {{ .Values.config.dryRun }}
+    rebalance:
+      nodeUsageThreshold: {{ .Values.config.rebalance.nodeUsageThreshold }}
+      maxEvictionsPerDay: {{ .Values.config.rebalance.maxEvictionsPerDay }}
+      cooldownMinutes: {{ .Values.config.rebalance.cooldownMinutes }}
+      maintenanceWindow: {{ .Values.config.rebalance.maintenanceWindow | quote }}
+      smallestFirst: {{ .Values.config.rebalance.smallestFirst }}
+      graduateAfterCycles: {{ .Values.config.rebalance.graduateAfterCycles }}
+    steadyState:
+      imbalanceRatio: {{ .Values.config.steadyState.imbalanceRatio }}
+      maxEvictionsPerDay: {{ .Values.config.steadyState.maxEvictionsPerDay }}
+      cooldownMinutes: {{ .Values.config.steadyState.cooldownMinutes }}

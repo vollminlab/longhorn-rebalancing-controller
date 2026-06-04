@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "longhorn-rebalancing-controller.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "longhorn-rebalancing-controller.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ include "longhorn-rebalancing-controller.fullname" . }}
+  template:
+    metadata:
+      labels:
+        {{- include "longhorn-rebalancing-controller.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "longhorn-rebalancing-controller.serviceAccountName" . }}
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: controller
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config-map-name={{ include "longhorn-rebalancing-controller.fullname" . }}
+            - --config-map-namespace={{ .Values.namespace }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
