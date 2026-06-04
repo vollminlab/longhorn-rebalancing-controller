@@ -1,2 +1,27 @@
-*.tgz
+# Compiled binaries
+controller
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+*.prof
+/cover.html
+
+# Dependency directory
 /vendor/
+
+# Helm packages
+*.tgz
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
