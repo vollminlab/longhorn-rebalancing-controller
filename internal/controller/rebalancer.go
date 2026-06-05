@@ -277,7 +277,7 @@ func (r *RebalancingReconciler) safetyGatesPass(ctx context.Context, volumes *lh
 	for i := range volumes.Items {
 		v := &volumes.Items[i]
 		rob := v.Status.Robustness
-		if rob == "degraded" || rob == "faulted" || rob == "unknown" {
+		if rob == "degraded" || rob == "faulted" {
 			log.Info("volume not healthy — skipping eviction", "volume", v.Name, "robustness", rob)
 			return false
 		}
