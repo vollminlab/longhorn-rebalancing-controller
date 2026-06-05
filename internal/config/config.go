@@ -75,7 +75,29 @@ func ParseYAML(data []byte) (*Config, error) {
 	if _, err := ParseWindow(cfg.Rebalance.MaintenanceWindow); err != nil {
 		return nil, fmt.Errorf("maintenanceWindow: %w", err)
 	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("config validation: %w", err)
+	}
 	return cfg, nil
+}
+
+func (c *Config) Validate() error {
+	if c.Rebalance.NodeUsageThreshold <= 0 || c.Rebalance.NodeUsageThreshold > 100 {
+		return fmt.Errorf("rebalance.nodeUsageThreshold must be between 0 and 100, got %.1f", c.Rebalance.NodeUsageThreshold)
+	}
+	if c.SteadyState.ImbalanceRatio <= 1.0 {
+		return fmt.Errorf("steadyState.imbalanceRatio must be > 1.0, got %.2f", c.SteadyState.ImbalanceRatio)
+	}
+	if c.Rebalance.GraduateAfterCycles <= 0 {
+		return fmt.Errorf("rebalance.graduateAfterCycles must be > 0, got %d", c.Rebalance.GraduateAfterCycles)
+	}
+	if c.Rebalance.CooldownMinutes < 0 {
+		return fmt.Errorf("rebalance.cooldownMinutes must be >= 0")
+	}
+	if c.SteadyState.CooldownMinutes < 0 {
+		return fmt.Errorf("steadyState.cooldownMinutes must be >= 0")
+	}
+	return nil
 }
 
 // ParseWindow parses a "HH:MM-HH:MM" window string.
