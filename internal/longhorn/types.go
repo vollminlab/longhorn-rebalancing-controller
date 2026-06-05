@@ -34,6 +34,7 @@ type LonghornNode struct {
 
 type LonghornNodeSpec struct {
 	Disks map[string]LonghornDiskSpec `json:"disks,omitempty"`
+	Tags  []string                    `json:"tags,omitempty"`
 }
 
 type LonghornDiskSpec struct {
@@ -66,6 +67,10 @@ func (n *LonghornNode) DeepCopy() *LonghornNode {
 		for k, v := range n.Spec.Disks {
 			out.Spec.Disks[k] = v
 		}
+	}
+	if n.Spec.Tags != nil {
+		out.Spec.Tags = make([]string, len(n.Spec.Tags))
+		copy(out.Spec.Tags, n.Spec.Tags)
 	}
 	if n.Status.DiskStatus != nil {
 		out.Status.DiskStatus = make(map[string]LonghornDiskStatus, len(n.Status.DiskStatus))
@@ -174,7 +179,8 @@ type LonghornVolume struct {
 }
 
 type LonghornVolumeSpec struct {
-	NumberOfReplicas int `json:"numberOfReplicas,omitempty"`
+	NumberOfReplicas int    `json:"numberOfReplicas,omitempty"`
+	StorageClassName string `json:"storageClassName,omitempty"`
 }
 
 type LonghornVolumeStatus struct {
