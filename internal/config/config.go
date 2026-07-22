@@ -17,6 +17,15 @@ type Config struct {
 	MinDestinationFreePct float64           `json:"minDestinationFreePct"`
 	Rebalance             RebalanceConfig   `json:"rebalance"`
 	SteadyState           SteadyStateConfig `json:"steadyState"`
+	Move                  MoveConfig        `json:"move"`
+}
+
+// MoveConfig controls the surge-move mechanism (add replica on destination,
+// wait healthy, remove source). A move that exceeds TimeoutMinutes is aborted
+// and counts against MaxFailuresPerDay instead of the eviction cap.
+type MoveConfig struct {
+	TimeoutMinutes    int `json:"timeoutMinutes"`
+	MaxFailuresPerDay int `json:"maxFailuresPerDay"`
 }
 
 type RebalanceConfig struct {
@@ -68,6 +77,10 @@ func Default() *Config {
 			MaxEvictionsPerDay: 5,
 			CooldownMinutes:    10,
 		},
+		Move: MoveConfig{
+			TimeoutMinutes:    90,
+			MaxFailuresPerDay: 3,
+		},
 	}
 }
 
@@ -104,6 +117,12 @@ func (c *Config) Validate() error {
 	}
 	if c.SteadyState.CooldownMinutes < 0 {
 		return fmt.Errorf("steadyState.cooldownMinutes must be >= 0")
+	}
+	if c.Move.TimeoutMinutes <= 0 {
+		return fmt.Errorf("move.timeoutMinutes must be > 0, got %d", c.Move.TimeoutMinutes)
+	}
+	if c.Move.MaxFailuresPerDay < 0 {
+		return fmt.Errorf("move.maxFailuresPerDay must be >= 0, got %d", c.Move.MaxFailuresPerDay)
 	}
 	return nil
 }

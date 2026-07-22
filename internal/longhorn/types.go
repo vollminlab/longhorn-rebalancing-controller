@@ -129,6 +129,11 @@ type LonghornReplicaSpec struct {
 	VolumeSize        string `json:"volumeSize,omitempty"`
 	Active            bool   `json:"active,omitempty"`
 	EvictionRequested bool   `json:"evictionRequested,omitempty"`
+	// HealthyAt is set by Longhorn once the replica holds a full copy of the
+	// data; FailedAt is set when the replica fails. Both live in spec, not
+	// status, in Longhorn's data model.
+	HealthyAt string `json:"healthyAt,omitempty"`
+	FailedAt  string `json:"failedAt,omitempty"`
 }
 
 type LonghornReplicaStatus struct {

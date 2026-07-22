@@ -43,6 +43,7 @@ type RebalancingReconciler struct {
 	consecutiveCleanCycles int
 	lastEvictionTime       time.Time
 	todayEvictions         int
+	todayMoveFailures      int
 	evictionResetDay       int
 }
 
@@ -75,6 +76,23 @@ func (r *RebalancingReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{RequeueAfter: r.SyncInterval}, err
 	}
 
+	// An in-flight surge-move is progressed before anything else — the surged
+	// volume is deliberately degraded while its new replica rebuilds, so the
+	// safety gates below would deadlock the move. No new move starts while one
+	// is running.
+	if inFlight := findInFlightMove(state.volumes); inFlight != nil {
+		now := time.Now()
+		outcome, err := r.progressMove(ctx, cfg, inFlight, state.replicas, now)
+		if err != nil {
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, err
+		}
+		r.recordMoveOutcome(outcome, now)
+		if outcome == moveInProgress {
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		return ctrl.Result{RequeueAfter: r.SyncInterval}, nil
+	}
+
 	scEligibility := buildSCEligibility(state.storageClasses, state.nodes)
 	volumeToSC := buildVolumeToSC(state.volumes)
 	volumeNodes := buildVolumeReplicaNodes(state.replicas)
@@ -85,12 +103,12 @@ func (r *RebalancingReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{RequeueAfter: r.SyncInterval}, nil
 	}
 
-	evicted, err := r.maybeEvict(ctx, cfg, stats, volumeToSC, scEligibility, volumeNodes)
+	moved, err := r.maybeEvict(ctx, cfg, stats, volumeToSC, scEligibility, volumeNodes, state.volumes, state.replicas)
 	if err != nil {
 		return ctrl.Result{RequeueAfter: r.SyncInterval}, err
 	}
-	if evicted {
-		return ctrl.Result{RequeueAfter: 2 * time.Minute}, nil
+	if moved {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	return ctrl.Result{RequeueAfter: r.SyncInterval}, nil
 }
@@ -325,24 +343,29 @@ func (r *RebalancingReconciler) maybeEvict(
 	volumeToSC map[string]string,
 	scEligibility map[string]map[string]struct{},
 	volumeNodes map[string]map[string]struct{},
+	vols *lhv1b2.LonghornVolumeList,
+	reps *lhv1b2.LonghornReplicaList,
 ) (bool, error) {
+	log := ctrl.LoggerFrom(ctx)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	now := time.Now()
-	today := now.YearDay()
-	if today != r.evictionResetDay {
-		r.todayEvictions = 0
-		r.evictionResetDay = today
-	}
+	r.resetDailyCountersLocked(now)
 
 	r.doUpdateMode(ctx, cfg, stats)
 
+	if !cfg.DryRun && r.todayMoveFailures >= cfg.Move.MaxFailuresPerDay {
+		log.Info("move failure cap reached — no new moves today",
+			"failures", r.todayMoveFailures, "cap", cfg.Move.MaxFailuresPerDay)
+		return false, nil
+	}
+
 	switch r.mode {
 	case modeRebalance:
-		return r.evictRebalance(ctx, cfg, stats, volumeToSC, scEligibility, volumeNodes, now)
+		return r.evictRebalance(ctx, cfg, stats, volumeToSC, scEligibility, volumeNodes, vols, reps, now)
 	case modeSteadyState:
-		return r.evictSteadyState(ctx, cfg, stats, volumeToSC, scEligibility, volumeNodes, now)
+		return r.evictSteadyState(ctx, cfg, stats, volumeToSC, scEligibility, volumeNodes, vols, reps, now)
 	}
 	return false, nil
 }
@@ -387,6 +410,8 @@ func (r *RebalancingReconciler) evictRebalance(
 	volumeToSC map[string]string,
 	scEligibility map[string]map[string]struct{},
 	volumeNodes map[string]map[string]struct{},
+	vols *lhv1b2.LonghornVolumeList,
+	reps *lhv1b2.LonghornReplicaList,
 	now time.Time,
 ) (bool, error) {
 	log := ctrl.LoggerFrom(ctx)
@@ -415,14 +440,15 @@ func (r *RebalancingReconciler) evictRebalance(
 	}
 
 	viable := filterViableReplicas(stats[targetNode].replicas, targetNode, volumeToSC, scEligibility, stats, volumeNodes, cfg.MinDestinationFreePct)
+	viable = filterAttachedReplicas(viable, vols)
 	victim := findVictim(viable, cfg.Rebalance.SmallestFirst)
 	if victim == nil {
-		log.Info("no evictable replica on overloaded node", "node", targetNode)
+		log.Info("no movable replica on overloaded node", "node", targetNode)
 		return false, nil
 	}
 
 	size, _ := strconv.ParseInt(victim.Spec.VolumeSize, 10, 64)
-	log.Info("evicting replica (rebalance)",
+	log.Info("starting surge-move (rebalance)",
 		"replica", victim.Name,
 		"node", targetNode,
 		"volumeName", victim.Spec.VolumeName,
@@ -435,11 +461,13 @@ func (r *RebalancingReconciler) evictRebalance(
 		return false, nil
 	}
 
-	if err := r.setEvictionRequested(ctx, victim); err != nil {
+	vol := findVolume(vols, victim.Spec.VolumeName)
+	if vol == nil {
+		return false, fmt.Errorf("volume %s for victim replica %s not found", victim.Spec.VolumeName, victim.Name)
+	}
+	if err := r.startMove(ctx, vol, victim, reps, now); err != nil {
 		return false, err
 	}
-	r.lastEvictionTime = now
-	r.todayEvictions++
 	return true, nil
 }
 
@@ -450,6 +478,8 @@ func (r *RebalancingReconciler) evictSteadyState(
 	volumeToSC map[string]string,
 	scEligibility map[string]map[string]struct{},
 	volumeNodes map[string]map[string]struct{},
+	vols *lhv1b2.LonghornVolumeList,
+	reps *lhv1b2.LonghornReplicaList,
 	now time.Time,
 ) (bool, error) {
 	log := ctrl.LoggerFrom(ctx)
@@ -476,14 +506,15 @@ func (r *RebalancingReconciler) evictSteadyState(
 	}
 
 	viable := filterViableReplicas(stats[maxNode].replicas, maxNode, volumeToSC, scEligibility, stats, volumeNodes, cfg.MinDestinationFreePct)
+	viable = filterAttachedReplicas(viable, vols)
 	victim := findVictim(viable, true)
 	if victim == nil {
-		log.Info("no evictable replica on most-loaded node", "node", maxNode)
+		log.Info("no movable replica on most-loaded node", "node", maxNode)
 		return false, nil
 	}
 
 	size, _ := strconv.ParseInt(victim.Spec.VolumeSize, 10, 64)
-	log.Info("evicting replica (steady-state)",
+	log.Info("starting surge-move (steady-state)",
 		"replica", victim.Name,
 		"node", maxNode,
 		"volumeName", victim.Spec.VolumeName,
@@ -496,18 +527,14 @@ func (r *RebalancingReconciler) evictSteadyState(
 		return false, nil
 	}
 
-	if err := r.setEvictionRequested(ctx, victim); err != nil {
+	vol := findVolume(vols, victim.Spec.VolumeName)
+	if vol == nil {
+		return false, fmt.Errorf("volume %s for victim replica %s not found", victim.Spec.VolumeName, victim.Name)
+	}
+	if err := r.startMove(ctx, vol, victim, reps, now); err != nil {
 		return false, err
 	}
-	r.lastEvictionTime = now
-	r.todayEvictions++
 	return true, nil
-}
-
-func (r *RebalancingReconciler) setEvictionRequested(ctx context.Context, replica *lhv1b2.LonghornReplica) error {
-	patch := client.MergeFrom(replica.DeepCopy())
-	replica.Spec.EvictionRequested = true
-	return r.Client.Patch(ctx, replica, patch)
 }
 
 // filterViableReplicas returns only those replicas whose eviction has at least one

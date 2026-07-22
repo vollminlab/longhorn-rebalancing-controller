@@ -26,6 +26,13 @@ config:
     imbalanceRatio: 1.5
     maxEvictionsPerDay: 5
     cooldownMinutes: 10
+  move:
+    # A surge-move past this age is aborted (surged replica deleted, source
+    # kept, spec restored). Surge rebuild is ~20 min per 100 GiB.
+    timeoutMinutes: 90
+    # Aborted moves count here, not against maxEvictionsPerDay; once reached,
+    # no new moves start until the next day.
+    maxFailuresPerDay: 3
 
 resources:
   limits:
