@@ -8,6 +8,7 @@ metadata:
 data:
   config.yaml: |
     dryRun: {{ .Values.config.dryRun }}
+    minDestinationFreePct: {{ .Values.config.minDestinationFreePct }}
     rebalance:
       nodeUsageThreshold: {{ .Values.config.rebalance.nodeUsageThreshold }}
       maxEvictionsPerDay: {{ .Values.config.rebalance.maxEvictionsPerDay }}

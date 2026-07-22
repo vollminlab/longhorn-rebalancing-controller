@@ -10,9 +10,13 @@ import (
 )
 
 type Config struct {
-	DryRun      bool             `json:"dryRun"`
-	Rebalance   RebalanceConfig  `json:"rebalance"`
-	SteadyState SteadyStateConfig `json:"steadyState"`
+	DryRun bool `json:"dryRun"`
+	// MinDestinationFreePct is the minimum actual free disk (percent of Longhorn
+	// disk capacity) a destination node must retain after absorbing an evicted
+	// replica. Keep it above the NodeDiskSpaceLow alert threshold (20%).
+	MinDestinationFreePct float64           `json:"minDestinationFreePct"`
+	Rebalance             RebalanceConfig   `json:"rebalance"`
+	SteadyState           SteadyStateConfig `json:"steadyState"`
 }
 
 type RebalanceConfig struct {
@@ -49,7 +53,8 @@ func (w MaintenanceWindow) Contains(t time.Time) bool {
 
 func Default() *Config {
 	return &Config{
-		DryRun: true,
+		DryRun:                true,
+		MinDestinationFreePct: 25.0,
 		Rebalance: RebalanceConfig{
 			NodeUsageThreshold:  75.0,
 			MaxEvictionsPerDay:  2,
@@ -82,6 +87,9 @@ func ParseYAML(data []byte) (*Config, error) {
 }
 
 func (c *Config) Validate() error {
+	if c.MinDestinationFreePct < 0 || c.MinDestinationFreePct >= 100 {
+		return fmt.Errorf("minDestinationFreePct must be in [0, 100), got %.1f", c.MinDestinationFreePct)
+	}
 	if c.Rebalance.NodeUsageThreshold <= 0 || c.Rebalance.NodeUsageThreshold > 100 {
 		return fmt.Errorf("rebalance.nodeUsageThreshold must be between 0 and 100, got %.1f", c.Rebalance.NodeUsageThreshold)
 	}

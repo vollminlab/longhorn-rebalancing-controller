@@ -11,6 +11,10 @@ namespace: longhorn-system
 
 config:
   dryRun: true
+  # Minimum actual free disk (% of Longhorn disk capacity) a destination node
+  # must retain after absorbing an evicted replica. Keep above the
+  # NodeDiskSpaceLow alert threshold (20%).
+  minDestinationFreePct: 25
   rebalance:
     nodeUsageThreshold: 75
     maxEvictionsPerDay: 2
