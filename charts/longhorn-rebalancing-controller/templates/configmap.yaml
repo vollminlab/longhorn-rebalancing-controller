@@ -20,3 +20,6 @@ data:
       imbalanceRatio: {{ .Values.config.steadyState.imbalanceRatio }}
       maxEvictionsPerDay: {{ .Values.config.steadyState.maxEvictionsPerDay }}
       cooldownMinutes: {{ .Values.config.steadyState.cooldownMinutes }}
+    move:
+      timeoutMinutes: {{ .Values.config.move.timeoutMinutes }}
+      maxFailuresPerDay: {{ .Values.config.move.maxFailuresPerDay }}
