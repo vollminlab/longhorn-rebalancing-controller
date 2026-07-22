@@ -49,6 +49,7 @@ type RebalancingReconciler struct {
 type nodeStats struct {
 	scheduledBytes int64
 	maxBytes       int64
+	availableBytes int64
 	usagePct       float64
 	replicas       []*lhv1b2.LonghornReplica
 }
@@ -76,6 +77,7 @@ func (r *RebalancingReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	scEligibility := buildSCEligibility(state.storageClasses, state.nodes)
 	volumeToSC := buildVolumeToSC(state.volumes)
+	volumeNodes := buildVolumeReplicaNodes(state.replicas)
 	stats := computeNodeStats(state.nodes, state.replicas)
 	r.logNodeStats(ctx, stats)
 
@@ -83,7 +85,7 @@ func (r *RebalancingReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{RequeueAfter: r.SyncInterval}, nil
 	}
 
-	evicted, err := r.maybeEvict(ctx, cfg, stats, volumeToSC, scEligibility)
+	evicted, err := r.maybeEvict(ctx, cfg, stats, volumeToSC, scEligibility, volumeNodes)
 	if err != nil {
 		return ctrl.Result{RequeueAfter: r.SyncInterval}, err
 	}
@@ -201,6 +203,27 @@ func buildVolumeToSC(volumes *lhv1b2.LonghornVolumeList) map[string]string {
 	return m
 }
 
+// buildVolumeReplicaNodes maps each volume to the set of nodes currently holding
+// one of its active replicas. Replicas pending eviction are included: their data
+// stays on the node until the rebuild completes, so Longhorn's replica
+// anti-affinity still excludes that node as a rebuild destination.
+func buildVolumeReplicaNodes(replicas *lhv1b2.LonghornReplicaList) map[string]map[string]struct{} {
+	m := make(map[string]map[string]struct{})
+	for i := range replicas.Items {
+		rep := &replicas.Items[i]
+		if !rep.Spec.Active || rep.Spec.NodeID == "" {
+			continue
+		}
+		nodes, ok := m[rep.Spec.VolumeName]
+		if !ok {
+			nodes = make(map[string]struct{})
+			m[rep.Spec.VolumeName] = nodes
+		}
+		nodes[rep.Spec.NodeID] = struct{}{}
+	}
+	return m
+}
+
 // computeNodeStats aggregates per-node scheduled/max bytes and associates active replicas.
 // Replicas with EvictionRequested=true have their size subtracted from scheduledBytes
 // to reflect the space Longhorn will free once eviction completes.
@@ -216,6 +239,7 @@ func computeNodeStats(nodes *lhv1b2.LonghornNodeList, replicas *lhv1b2.LonghornR
 			}
 			s.scheduledBytes += disk.StorageScheduled
 			s.maxBytes += disk.StorageMaximum
+			s.availableBytes += disk.StorageAvailable
 		}
 		stats[node.Name] = s
 	}
@@ -300,6 +324,7 @@ func (r *RebalancingReconciler) maybeEvict(
 	stats map[string]*nodeStats,
 	volumeToSC map[string]string,
 	scEligibility map[string]map[string]struct{},
+	volumeNodes map[string]map[string]struct{},
 ) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -315,9 +340,9 @@ func (r *RebalancingReconciler) maybeEvict(
 
 	switch r.mode {
 	case modeRebalance:
-		return r.evictRebalance(ctx, cfg, stats, volumeToSC, scEligibility, now)
+		return r.evictRebalance(ctx, cfg, stats, volumeToSC, scEligibility, volumeNodes, now)
 	case modeSteadyState:
-		return r.evictSteadyState(ctx, cfg, stats, volumeToSC, scEligibility, now)
+		return r.evictSteadyState(ctx, cfg, stats, volumeToSC, scEligibility, volumeNodes, now)
 	}
 	return false, nil
 }
@@ -361,6 +386,7 @@ func (r *RebalancingReconciler) evictRebalance(
 	stats map[string]*nodeStats,
 	volumeToSC map[string]string,
 	scEligibility map[string]map[string]struct{},
+	volumeNodes map[string]map[string]struct{},
 	now time.Time,
 ) (bool, error) {
 	log := ctrl.LoggerFrom(ctx)
@@ -388,7 +414,7 @@ func (r *RebalancingReconciler) evictRebalance(
 		return false, nil
 	}
 
-	viable := filterViableReplicas(stats[targetNode].replicas, targetNode, volumeToSC, scEligibility, stats)
+	viable := filterViableReplicas(stats[targetNode].replicas, targetNode, volumeToSC, scEligibility, stats, volumeNodes, cfg.MinDestinationFreePct)
 	victim := findVictim(viable, cfg.Rebalance.SmallestFirst)
 	if victim == nil {
 		log.Info("no evictable replica on overloaded node", "node", targetNode)
@@ -423,6 +449,7 @@ func (r *RebalancingReconciler) evictSteadyState(
 	stats map[string]*nodeStats,
 	volumeToSC map[string]string,
 	scEligibility map[string]map[string]struct{},
+	volumeNodes map[string]map[string]struct{},
 	now time.Time,
 ) (bool, error) {
 	log := ctrl.LoggerFrom(ctx)
@@ -448,7 +475,7 @@ func (r *RebalancingReconciler) evictSteadyState(
 		return false, nil
 	}
 
-	viable := filterViableReplicas(stats[maxNode].replicas, maxNode, volumeToSC, scEligibility, stats)
+	viable := filterViableReplicas(stats[maxNode].replicas, maxNode, volumeToSC, scEligibility, stats, volumeNodes, cfg.MinDestinationFreePct)
 	victim := findVictim(viable, true)
 	if victim == nil {
 		log.Info("no evictable replica on most-loaded node", "node", maxNode)
@@ -483,34 +510,64 @@ func (r *RebalancingReconciler) setEvictionRequested(ctx context.Context, replic
 	return r.Client.Patch(ctx, replica, patch)
 }
 
-// filterViableReplicas returns only those replicas for which at least one eligible
-// node (per SC nodeSelector) exists that is less loaded than currentNode.
-// This prevents evicting replicas that can only be rebuilt on the same node.
+// filterViableReplicas returns only those replicas whose eviction has at least one
+// realistic destination that improves the balance. A destination is realistic when
+// it is SC-eligible (per nodeSelector), is not the current node, and does not
+// already hold a replica of the same volume — Longhorn's replica anti-affinity
+// excludes those nodes, so counting them as destinations models a move Longhorn
+// will never make. Each realistic destination must also pass two guards:
+//
+//   - no-flip: after the move, the destination's scheduled bytes must not exceed
+//     the source's remaining scheduled bytes. Otherwise the eviction just
+//     relocates the hot spot onto the destination.
+//   - free-disk floor: absorbing the replica must leave the destination with at
+//     least minFreePct of its Longhorn disk capacity actually free, so a rebuild
+//     cannot push a node toward disk-space alerts.
+//
+// Longhorn, not this controller, picks the actual rebuild destination — but the
+// no-flip condition is monotone in destination load, so if any destination
+// satisfies it, the least-loaded one (Longhorn's preference) does too.
 func filterViableReplicas(
 	replicas []*lhv1b2.LonghornReplica,
 	currentNode string,
 	volumeToSC map[string]string,
 	scEligibility map[string]map[string]struct{},
 	stats map[string]*nodeStats,
+	volumeNodes map[string]map[string]struct{},
+	minFreePct float64,
 ) []*lhv1b2.LonghornReplica {
 	currentLoad := stats[currentNode].scheduledBytes
 	var viable []*lhv1b2.LonghornReplica
 	for _, rep := range replicas {
-		scName := volumeToSC[rep.Spec.VolumeName]
-		eligible, ok := scEligibility[scName]
-		if !ok {
-			// Unknown SC — allow eviction conservatively.
-			viable = append(viable, rep)
-			continue
+		size, err := strconv.ParseInt(rep.Spec.VolumeSize, 10, 64)
+		if err != nil {
+			continue // can't model the move without a size
 		}
-		for nodeName := range eligible {
-			if nodeName == currentNode {
+		// Unknown SC behaves like an SC without nodeSelector: every node is a
+		// candidate, but the guards below still apply.
+		eligible := scEligibility[volumeToSC[rep.Spec.VolumeName]]
+		srcAfter := currentLoad - size
+		peers := volumeNodes[rep.Spec.VolumeName]
+		for nodeName, s := range stats {
+			if nodeName == currentNode || s.maxBytes == 0 {
 				continue
 			}
-			if s, ok := stats[nodeName]; ok && s.scheduledBytes < currentLoad {
-				viable = append(viable, rep)
-				break
+			if eligible != nil {
+				if _, ok := eligible[nodeName]; !ok {
+					continue
+				}
 			}
+			if _, held := peers[nodeName]; held {
+				continue // anti-affinity: Longhorn won't rebuild here
+			}
+			if s.scheduledBytes+size > srcAfter {
+				continue // no-flip: destination would end up hotter than the source
+			}
+			if float64(s.availableBytes-size)/float64(s.maxBytes)*100 < minFreePct {
+				continue // free-disk floor
+			}
+			viable = append(viable, rep)
+			break
 		}
 	}
 	return viable

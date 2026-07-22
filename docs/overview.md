@@ -30,6 +30,23 @@ All must hold before any eviction:
 5. Within maintenance window (rebalance mode only)
 6. `dryRun: false` in the ConfigMap
 
+## Destination guards
+
+Longhorn — not this controller — picks where an evicted replica is rebuilt. A replica
+is only considered evictable if at least one **realistic destination** exists:
+a node that is SC-eligible, is not the source node, and does not already hold a
+replica of the same volume (Longhorn's replica anti-affinity rules those out).
+Each realistic destination must also pass:
+
+1. **No-flip guard** — the destination's scheduled bytes after absorbing the
+   replica must not exceed the source's scheduled bytes after losing it.
+   Without this, evicting a large replica from the fullest node can simply move
+   the hot spot to the rebuild target (which then gets evicted back — ping-pong).
+2. **Free-disk floor** — the destination must retain at least
+   `minDestinationFreePct` (default 25%) of its Longhorn disk capacity in
+   actual free space after absorbing the replica, so a rebuild can't push a
+   node into disk-space alerts.
+
 ## Rollout
 
 Deploy with `dryRun: true` (the default). Watch logs for several days, then flip to `dryRun: false` once the decisions look correct.
