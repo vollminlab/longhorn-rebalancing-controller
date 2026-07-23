@@ -10,6 +10,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/vollminlab/longhorn-rebalancing-controller/internal/config"
 	lhv1b2 "github.com/vollminlab/longhorn-rebalancing-controller/internal/longhorn"
@@ -42,7 +43,13 @@ const (
 	moveAborted
 )
 
-// startMove begins a surge-move in one atomic update: numberOfReplicas+1 plus
+// All Volume CR writes below use JSON merge patches, never full-object
+// Updates: LonghornVolumeSpec is a partial type (no size field), so a full
+// Update serializes spec.size as absent and Longhorn's validator.longhorn.io
+// webhook denies it as a shrink ("shrinking volume ... to 2097152 is not
+// supported"). A merge patch carries only the fields we changed.
+
+// startMove begins a surge-move in one atomic patch: numberOfReplicas+1 plus
 // the complete move state as annotations.
 func (r *RebalancingReconciler) startMove(
 	ctx context.Context,
@@ -58,6 +65,7 @@ func (r *RebalancingReconciler) startMove(
 			initial = append(initial, rep.Name)
 		}
 	}
+	orig := vol.DeepCopy()
 	if vol.Annotations == nil {
 		vol.Annotations = map[string]string{}
 	}
@@ -66,7 +74,7 @@ func (r *RebalancingReconciler) startMove(
 	vol.Annotations[annMoveInitial] = strings.Join(initial, ",")
 	vol.Annotations[annMoveStartedAt] = now.Format(time.RFC3339)
 	vol.Spec.NumberOfReplicas++
-	return r.Update(ctx, vol)
+	return r.Patch(ctx, vol, client.MergeFrom(orig))
 }
 
 func findInFlightMove(volumes *lhv1b2.LonghornVolumeList) *lhv1b2.LonghornVolume {
@@ -128,8 +136,9 @@ func (r *RebalancingReconciler) progressMove(
 		}
 	}
 	if newRep != nil && newName == "" {
+		orig := vol.DeepCopy()
 		vol.Annotations[annMoveNewReplica] = newRep.Name
-		if err := r.Update(ctx, vol); err != nil {
+		if err := r.Patch(ctx, vol, client.MergeFrom(orig)); err != nil {
 			return moveInProgress, err
 		}
 		log.Info("surge replica scheduled",
@@ -168,8 +177,9 @@ func (r *RebalancingReconciler) completeMove(
 	if err := r.Delete(ctx, src); err != nil && !apierrors.IsNotFound(err) {
 		return moveInProgress, fmt.Errorf("delete source replica %s: %w", source, err)
 	}
+	orig := vol.DeepCopy()
 	clearMoveState(vol, original)
-	if err := r.Update(ctx, vol); err != nil {
+	if err := r.Patch(ctx, vol, client.MergeFrom(orig)); err != nil {
 		// Source is already gone; the next reconcile retries the restore
 		// (the delete tolerates NotFound).
 		return moveInProgress, err
@@ -199,8 +209,9 @@ func (r *RebalancingReconciler) abortMove(
 			return moveInProgress, fmt.Errorf("delete surged replica %s: %w", newRep.Name, err)
 		}
 	}
+	orig := vol.DeepCopy()
 	clearMoveState(vol, original)
-	if err := r.Update(ctx, vol); err != nil {
+	if err := r.Patch(ctx, vol, client.MergeFrom(orig)); err != nil {
 		return moveInProgress, err
 	}
 	log.Info("surge-move aborted on timeout", "volume", vol.Name, "sourceReplica", vol.Name)
