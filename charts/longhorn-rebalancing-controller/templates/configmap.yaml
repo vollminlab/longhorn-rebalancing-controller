@@ -23,3 +23,4 @@ data:
     move:
       timeoutMinutes: {{ .Values.config.move.timeoutMinutes }}
       maxFailuresPerDay: {{ .Values.config.move.maxFailuresPerDay }}
+      perVolumeBackoffMinutes: {{ .Values.config.move.perVolumeBackoffMinutes }}

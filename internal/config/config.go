@@ -26,6 +26,10 @@ type Config struct {
 type MoveConfig struct {
 	TimeoutMinutes    int `json:"timeoutMinutes"`
 	MaxFailuresPerDay int `json:"maxFailuresPerDay"`
+	// PerVolumeBackoffMinutes is how long a volume is kept off the victim list
+	// after it is surge-moved, so a single volume cannot be shuffled repeatedly
+	// during a convergence run. 0 disables the backoff.
+	PerVolumeBackoffMinutes int `json:"perVolumeBackoffMinutes"`
 }
 
 type RebalanceConfig struct {
@@ -78,8 +82,9 @@ func Default() *Config {
 			CooldownMinutes:    10,
 		},
 		Move: MoveConfig{
-			TimeoutMinutes:    90,
-			MaxFailuresPerDay: 3,
+			TimeoutMinutes:          90,
+			MaxFailuresPerDay:       3,
+			PerVolumeBackoffMinutes: 360,
 		},
 	}
 }
@@ -123,6 +128,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Move.MaxFailuresPerDay < 0 {
 		return fmt.Errorf("move.maxFailuresPerDay must be >= 0, got %d", c.Move.MaxFailuresPerDay)
+	}
+	if c.Move.PerVolumeBackoffMinutes < 0 {
+		return fmt.Errorf("move.perVolumeBackoffMinutes must be >= 0, got %d", c.Move.PerVolumeBackoffMinutes)
 	}
 	return nil
 }

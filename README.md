@@ -74,6 +74,7 @@ data:
     move:
       timeoutMinutes: 90             # abort a surge-move older than this
       maxFailuresPerDay: 3           # aborted moves before new moves stop for the day
+      perVolumeBackoffMinutes: 360   # keep a moved volume off the victim list this long
 ```
 
 ## Recommended rollout
@@ -108,6 +109,7 @@ helm install longhorn-rebalancing-controller \
 | `config.steadyState.imbalanceRatio` | `1.5` | Ratio threshold for steady-state moves |
 | `config.move.timeoutMinutes` | `90` | Age after which an in-flight move is aborted |
 | `config.move.maxFailuresPerDay` | `3` | Aborted moves before new moves stop for the day |
+| `config.move.perVolumeBackoffMinutes` | `360` | How long a moved volume is kept off the victim list (0 disables) |
 
 ## RBAC
 

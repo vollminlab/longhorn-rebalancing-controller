@@ -45,6 +45,12 @@ type RebalancingReconciler struct {
 	todayEvictions         int
 	todayMoveFailures      int
 	evictionResetDay       int
+	// lastMoveByVolume records when each volume was last surge-moved, so a single
+	// volume cannot be shuffled again within Move.PerVolumeBackoffMinutes. This is
+	// belt-and-suspenders on top of the peak-reduction guard: the guard already
+	// makes moves converge, and the backoff stops any one volume from absorbing
+	// repeated moves during that convergence.
+	lastMoveByVolume map[string]time.Time
 }
 
 type nodeStats struct {
@@ -441,6 +447,7 @@ func (r *RebalancingReconciler) evictRebalance(
 
 	viable := filterViableReplicas(stats[targetNode].replicas, targetNode, volumeToSC, scEligibility, stats, volumeNodes, cfg.MinDestinationFreePct)
 	viable = filterAttachedReplicas(viable, vols)
+	viable = r.filterVolumeBackoff(viable, cfg, now)
 	victim := findVictim(viable, cfg.Rebalance.SmallestFirst)
 	if victim == nil {
 		log.Info("no movable replica on overloaded node", "node", targetNode)
@@ -507,6 +514,7 @@ func (r *RebalancingReconciler) evictSteadyState(
 
 	viable := filterViableReplicas(stats[maxNode].replicas, maxNode, volumeToSC, scEligibility, stats, volumeNodes, cfg.MinDestinationFreePct)
 	viable = filterAttachedReplicas(viable, vols)
+	viable = r.filterVolumeBackoff(viable, cfg, now)
 	victim := findVictim(viable, true)
 	if victim == nil {
 		log.Info("no movable replica on most-loaded node", "node", maxNode)
@@ -544,16 +552,24 @@ func (r *RebalancingReconciler) evictSteadyState(
 // excludes those nodes, so counting them as destinations models a move Longhorn
 // will never make. Each realistic destination must also pass two guards:
 //
-//   - no-flip: after the move, the destination's scheduled bytes must not exceed
-//     the source's remaining scheduled bytes. Otherwise the eviction just
-//     relocates the hot spot onto the destination.
+//   - peak-reduction: after the move, the cluster's highest node load (scheduled
+//     bytes) must strictly decrease. This is what makes the controller converge —
+//     every accepted move lowers the global maximum, so the sequence terminates
+//     and cannot oscillate. It supersedes the earlier pairwise "no-flip" guard,
+//     which structurally forbade relieving a node whose largest replica exceeded
+//     any other node's headroom (e.g. the 100 GiB MinIO replica): no single
+//     destination could stay below the source's post-move load, so that replica
+//     could never move and the controller churned a smaller volume forever
+//     without relieving the hot node. Peak-reduction also rejects the tied-max
+//     case — moving off one of two equally hottest nodes leaves the twin at the
+//     peak, so nothing improves — which the no-flip guard would have allowed.
 //   - free-disk floor: absorbing the replica must leave the destination with at
 //     least minFreePct of its Longhorn disk capacity actually free, so a rebuild
 //     cannot push a node toward disk-space alerts.
 //
-// Longhorn, not this controller, picks the actual rebuild destination — but the
-// no-flip condition is monotone in destination load, so if any destination
-// satisfies it, the least-loaded one (Longhorn's preference) does too.
+// Longhorn, not this controller, picks the actual rebuild destination — but
+// postMoveMaxLoad is monotone in destination load, so if any destination lowers
+// the peak, the least-loaded one (Longhorn's preference) does too.
 func filterViableReplicas(
 	replicas []*lhv1b2.LonghornReplica,
 	currentNode string,
@@ -563,7 +579,7 @@ func filterViableReplicas(
 	volumeNodes map[string]map[string]struct{},
 	minFreePct float64,
 ) []*lhv1b2.LonghornReplica {
-	currentLoad := stats[currentNode].scheduledBytes
+	globalMax := maxScheduled(stats)
 	var viable []*lhv1b2.LonghornReplica
 	for _, rep := range replicas {
 		size, err := strconv.ParseInt(rep.Spec.VolumeSize, 10, 64)
@@ -573,7 +589,6 @@ func filterViableReplicas(
 		// Unknown SC behaves like an SC without nodeSelector: every node is a
 		// candidate, but the guards below still apply.
 		eligible := scEligibility[volumeToSC[rep.Spec.VolumeName]]
-		srcAfter := currentLoad - size
 		peers := volumeNodes[rep.Spec.VolumeName]
 		for nodeName, s := range stats {
 			if nodeName == currentNode || s.maxBytes == 0 {
@@ -587,8 +602,8 @@ func filterViableReplicas(
 			if _, held := peers[nodeName]; held {
 				continue // anti-affinity: Longhorn won't rebuild here
 			}
-			if s.scheduledBytes+size > srcAfter {
-				continue // no-flip: destination would end up hotter than the source
+			if postMoveMaxLoad(stats, currentNode, nodeName, size) >= globalMax {
+				continue // peak-reduction: the move must strictly lower the cluster max
 			}
 			if float64(s.availableBytes-size)/float64(s.maxBytes)*100 < minFreePct {
 				continue // free-disk floor
@@ -598,6 +613,59 @@ func filterViableReplicas(
 		}
 	}
 	return viable
+}
+
+// maxScheduled returns the highest scheduledBytes across all nodes.
+func maxScheduled(stats map[string]*nodeStats) int64 {
+	var m int64
+	for _, s := range stats {
+		if s.scheduledBytes > m {
+			m = s.scheduledBytes
+		}
+	}
+	return m
+}
+
+// postMoveMaxLoad returns what the cluster's highest node load would be after
+// moving a replica of the given size from src to dst — src loses the bytes, dst
+// gains them, every other node is unchanged.
+func postMoveMaxLoad(stats map[string]*nodeStats, src, dst string, size int64) int64 {
+	var maxLoad int64
+	for n, s := range stats {
+		load := s.scheduledBytes
+		switch n {
+		case src:
+			load -= size
+		case dst:
+			load += size
+		}
+		if load > maxLoad {
+			maxLoad = load
+		}
+	}
+	return maxLoad
+}
+
+// filterVolumeBackoff drops replicas whose volume was surge-moved within the
+// per-volume backoff window, so no single volume is moved twice in quick
+// succession. A non-positive PerVolumeBackoffMinutes disables the filter.
+func (r *RebalancingReconciler) filterVolumeBackoff(
+	replicas []*lhv1b2.LonghornReplica,
+	cfg *config.Config,
+	now time.Time,
+) []*lhv1b2.LonghornReplica {
+	if cfg.Move.PerVolumeBackoffMinutes <= 0 || len(r.lastMoveByVolume) == 0 {
+		return replicas
+	}
+	backoff := time.Duration(cfg.Move.PerVolumeBackoffMinutes) * time.Minute
+	var kept []*lhv1b2.LonghornReplica
+	for _, rep := range replicas {
+		if last, ok := r.lastMoveByVolume[rep.Spec.VolumeName]; ok && now.Sub(last) < backoff {
+			continue
+		}
+		kept = append(kept, rep)
+	}
+	return kept
 }
 
 func mostLoadedNode(stats map[string]*nodeStats) (string, float64) {

@@ -74,7 +74,16 @@ func (r *RebalancingReconciler) startMove(
 	vol.Annotations[annMoveInitial] = strings.Join(initial, ",")
 	vol.Annotations[annMoveStartedAt] = now.Format(time.RFC3339)
 	vol.Spec.NumberOfReplicas++
-	return r.Patch(ctx, vol, client.MergeFrom(orig))
+	if err := r.Patch(ctx, vol, client.MergeFrom(orig)); err != nil {
+		return err
+	}
+	// Record the move so filterVolumeBackoff can keep this volume off the victim
+	// list until the per-volume backoff window elapses.
+	if r.lastMoveByVolume == nil {
+		r.lastMoveByVolume = map[string]time.Time{}
+	}
+	r.lastMoveByVolume[vol.Name] = now
+	return nil
 }
 
 func findInFlightMove(volumes *lhv1b2.LonghornVolumeList) *lhv1b2.LonghornVolume {
