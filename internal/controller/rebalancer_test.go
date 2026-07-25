@@ -3,9 +3,11 @@ package controller
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/vollminlab/longhorn-rebalancing-controller/internal/config"
 	lhv1b2 "github.com/vollminlab/longhorn-rebalancing-controller/internal/longhorn"
 )
 
@@ -43,17 +45,19 @@ func allNodesEligible(stats map[string]*nodeStats) map[string]map[string]struct{
 }
 
 // TestFilterViable_AntiAffinityPingPong models the 2026-07-21 incident: the only
-// destination that would pass the no-flip guard already holds the volume's other
-// replica, so Longhorn would be forced to rebuild on an equally loaded node —
-// the eviction must be rejected.
+// destination that would lower the peak already holds the volume's other replica,
+// so Longhorn would be forced to rebuild on an equally loaded node — the eviction
+// must be rejected. w04 is the unique hottest node; every non-peer node is already
+// too full to absorb 100G without becoming the new peak, so only w02 (which holds
+// the peer replica) would reduce the max — and anti-affinity excludes it.
 func TestFilterViable_AntiAffinityPingPong(t *testing.T) {
 	stats := map[string]*nodeStats{
-		"w01": mkStats(128*gib, 250*gib),
+		"w01": mkStats(130*gib, 250*gib),
 		"w02": mkStats(24*gib, 250*gib), // holds the peer replica
-		"w03": mkStats(226*gib, 250*gib),
-		"w04": mkStats(226*gib, 250*gib), // source
-		"w05": mkStats(88*gib, 250*gib),
-		"w06": mkStats(122*gib, 250*gib),
+		"w03": mkStats(130*gib, 250*gib),
+		"w04": mkStats(226*gib, 250*gib), // source, unique peak
+		"w05": mkStats(130*gib, 250*gib),
+		"w06": mkStats(130*gib, 250*gib),
 	}
 	rep := mkReplica("minio-r1", "w04", "minio-vol", 100*gib)
 	volumeNodes := map[string]map[string]struct{}{
@@ -65,37 +69,96 @@ func TestFilterViable_AntiAffinityPingPong(t *testing.T) {
 		stats, volumeNodes, 25.0,
 	)
 	if len(viable) != 0 {
-		t.Fatalf("expected no viable replicas (anti-affinity excludes the only balanced destination), got %d", len(viable))
+		t.Fatalf("expected no viable replicas (anti-affinity excludes the only peak-lowering destination), got %d", len(viable))
 	}
 }
 
-// TestFilterViable_NoFlipGuard rejects an eviction whose only destination would
-// end up more loaded than the source after the move.
-func TestFilterViable_NoFlipGuard(t *testing.T) {
+// TestFilterViable_PeakReduction is the v0.4.0 guard: a move is viable only when it
+// strictly lowers the cluster's highest node load. This unblocks large stable
+// replicas (the MinIO backup-store replica) that the old no-flip guard wrongly
+// rejected, while still refusing moves that leave the peak unchanged or raise it.
+func TestFilterViable_PeakReduction(t *testing.T) {
+	// 100G move off the unique hottest node: src 226->126, dst 49->149; new peak
+	// 149 < 226 — the exact MinIO-on-w03 case the old no-flip guard blocked.
 	stats := map[string]*nodeStats{
-		"src": mkStats(200*gib, 250*gib),
-		"dst": mkStats(60*gib, 250*gib),
+		"src": mkStats(226*gib, 250*gib),
+		"dst": mkStats(49*gib, 250*gib),
 	}
-	// 100G move: src drops to 100G, dst rises to 160G — flip, reject.
-	rep := mkReplica("r1", "src", "vol", 100*gib)
+	rep := mkReplica("minio", "src", "minio-vol", 100*gib)
 	viable := filterViableReplicas(
 		[]*lhv1b2.LonghornReplica{rep}, "src",
-		map[string]string{"vol": "longhorn"}, allNodesEligible(stats),
-		stats, map[string]map[string]struct{}{"vol": {"src": {}}}, 25.0,
-	)
-	if len(viable) != 0 {
-		t.Fatalf("expected no-flip guard to reject, got %d viable", len(viable))
-	}
-
-	// 40G move: src drops to 160G, dst rises to 100G — improves spread, allow.
-	rep2 := mkReplica("r2", "src", "vol2", 40*gib)
-	viable = filterViableReplicas(
-		[]*lhv1b2.LonghornReplica{rep2}, "src",
-		map[string]string{"vol2": "longhorn"}, allNodesEligible(stats),
-		stats, map[string]map[string]struct{}{"vol2": {"src": {}}}, 25.0,
+		map[string]string{"minio-vol": "longhorn"}, allNodesEligible(stats),
+		stats, map[string]map[string]struct{}{"minio-vol": {"src": {}}}, 25.0,
 	)
 	if len(viable) != 1 {
-		t.Fatalf("expected 40G replica to be viable, got %d", len(viable))
+		t.Fatalf("expected peak-lowering 100G move to be viable, got %d", len(viable))
+	}
+
+	// A move that would make the destination the new, higher peak is rejected.
+	stats2 := map[string]*nodeStats{
+		"src": mkStats(200*gib, 250*gib),
+		"dst": mkStats(160*gib, 250*gib),
+	}
+	rep2 := mkReplica("r2", "src", "vol2", 100*gib) // dst -> 260 > 200
+	viable = filterViableReplicas(
+		[]*lhv1b2.LonghornReplica{rep2}, "src",
+		map[string]string{"vol2": "longhorn"}, allNodesEligible(stats2),
+		stats2, map[string]map[string]struct{}{"vol2": {"src": {}}}, 25.0,
+	)
+	if len(viable) != 0 {
+		t.Fatalf("expected move that raises the peak to be rejected, got %d viable", len(viable))
+	}
+
+	// Tied maximum: moving off one peak node leaves the twin at the same peak, so
+	// no single move reduces the cluster max — reject to prevent pointless churn.
+	stats3 := map[string]*nodeStats{
+		"src":  mkStats(226*gib, 250*gib),
+		"twin": mkStats(226*gib, 250*gib),
+		"cold": mkStats(20*gib, 250*gib),
+	}
+	rep3 := mkReplica("r3", "src", "vol3", 60*gib) // cold -> 80, but twin stays 226
+	viable = filterViableReplicas(
+		[]*lhv1b2.LonghornReplica{rep3}, "src",
+		map[string]string{"vol3": "longhorn"}, allNodesEligible(stats3),
+		stats3, map[string]map[string]struct{}{"vol3": {"src": {}}}, 25.0,
+	)
+	if len(viable) != 0 {
+		t.Fatalf("expected tied-peak move to be rejected (twin keeps the max), got %d viable", len(viable))
+	}
+}
+
+// TestFilterVolumeBackoff drops replicas whose volume was moved within the backoff
+// window, so a single volume cannot be shuffled twice in quick succession.
+func TestFilterVolumeBackoff(t *testing.T) {
+	now := time.Date(2026, 7, 25, 15, 0, 0, 0, time.UTC)
+	r := &RebalancingReconciler{
+		lastMoveByVolume: map[string]time.Time{
+			"recently-moved": now.Add(-30 * time.Minute),
+			"long-ago":       now.Add(-10 * time.Hour),
+		},
+	}
+	cfg := config.Default()
+	cfg.Move.PerVolumeBackoffMinutes = 360 // 6h
+
+	reps := []*lhv1b2.LonghornReplica{
+		mkReplica("a", "n", "recently-moved", 10*gib),
+		mkReplica("b", "n", "long-ago", 10*gib),
+		mkReplica("c", "n", "never-moved", 10*gib),
+	}
+	got := r.filterVolumeBackoff(reps, cfg, now)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 replicas after backoff filter, got %d", len(got))
+	}
+	for _, rep := range got {
+		if rep.Spec.VolumeName == "recently-moved" {
+			t.Fatalf("recently-moved volume should be filtered out by backoff")
+		}
+	}
+
+	// Backoff disabled (0) is a no-op: every replica passes.
+	cfg.Move.PerVolumeBackoffMinutes = 0
+	if got := r.filterVolumeBackoff(reps, cfg, now); len(got) != 3 {
+		t.Fatalf("expected backoff disabled to pass all 3 replicas, got %d", len(got))
 	}
 }
 

@@ -33,6 +33,10 @@ config:
     # Aborted moves count here, not against maxEvictionsPerDay; once reached,
     # no new moves start until the next day.
     maxFailuresPerDay: 3
+    # A volume is kept off the victim list for this long after it is moved, so a
+    # single volume can't be shuffled repeatedly within a convergence run. 0
+    # disables the backoff.
+    perVolumeBackoffMinutes: 360
 
 resources:
   limits:

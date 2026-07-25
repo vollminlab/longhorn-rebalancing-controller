@@ -38,14 +38,23 @@ a node that is SC-eligible, is not the source node, and does not already hold a
 replica of the same volume (Longhorn's replica anti-affinity rules those out).
 Each realistic destination must also pass:
 
-1. **No-flip guard** — the destination's scheduled bytes after absorbing the
-   replica must not exceed the source's scheduled bytes after losing it.
-   Without this, evicting a large replica from the fullest node can simply move
-   the hot spot to the rebuild target (which then gets evicted back — ping-pong).
+1. **Peak-reduction guard** — the move must strictly lower the cluster's highest
+   node load (scheduled bytes). Every accepted move shrinks the global maximum,
+   so the sequence of moves converges and cannot ping-pong. This replaces the
+   earlier pairwise no-flip guard, which compared only source and destination:
+   that guard structurally forbade relieving a node whose largest replica
+   exceeded every other node's headroom (e.g. a 100 GiB replica on a 90%-full
+   node), so the controller churned a smaller volume forever without ever
+   relieving the hot node. Peak-reduction also rejects the tied-maximum case,
+   where moving off one of two equally full nodes leaves the other at the peak.
 2. **Free-disk floor** — the destination must retain at least
    `minDestinationFreePct` (default 25%) of its Longhorn disk capacity in
    actual free space after absorbing the replica, so a rebuild can't push a
    node into disk-space alerts.
+
+A moved volume is then held off the victim list for `move.perVolumeBackoffMinutes`
+(default 360) so a single volume can't be shuffled repeatedly within one
+convergence run.
 
 ## Rollout
 
