@@ -9,7 +9,7 @@ on:
 jobs:
   test:
     name: Test
-    runs-on: vollminlab
+    runs-on: ${{ vars.CI_RUNNER || 'vollminlab' }}
     steps:
       - uses: actions/checkout@v6
 
