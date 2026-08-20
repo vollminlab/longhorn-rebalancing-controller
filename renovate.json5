@@ -1,0 +1,20 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  // Conventions match vollminlab/k8s-vollminlab-cluster so dependency PRs look the
+  // same across the org: same quiet-hours schedule, same labels, same commit prefix.
+  "timezone": "America/New_York",
+  "schedule": ["after 10pm every weekday", "before 5am every weekday", "every weekend"],
+  "prHourlyLimit": 5,
+  "prConcurrentLimit": 10,
+  "labels": ["renovate", "dependencies"],
+  "commitMessagePrefix": "chore(deps):",
+  // This repo builds an image that runs in the homelab cluster. Until 2026-08-20 no
+  // Renovate or Dependabot config existed here and the self-hosted Renovate ran with
+  // autodiscover: false against a repositories list naming only the cluster repo, so
+  // nothing in this repo had ever been offered a dependency update.
+  "enabledManagers": ["gomod", "dockerfile", "github-actions"],
+  // gomodTidy keeps go.sum consistent with the bumped go.mod inside the same PR;
+  // without it a module update can land a go.sum the build then rejects.
+  "postUpdateOptions": ["gomodTidy"]
+}
