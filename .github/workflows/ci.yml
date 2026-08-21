@@ -52,6 +52,12 @@ jobs:
       # is to invoke the entrypoint itself.
       - name: Verify the image can execute its entrypoint
         run: |
+          # GitHub runs `run:` steps under `bash -e`. `set -uo pipefail` does NOT clear
+          # errexit, so a command substitution whose command exits non-zero aborts the
+          # step before $? can be read -- which is a false failure for any binary that
+          # exits non-zero on --help. Go's flag package exits 2, so that is most of
+          # them. Disable errexit explicitly and judge on the exit code below instead.
+          set +e
           set -uo pipefail
           out=$(docker run --rm ci-build:${{ github.sha }} --help 2>&1); rc=$?
           printf '%s\n' "$out" | head -20
