@@ -20,3 +20,53 @@ jobs:
 
       - name: Run tests
         run: go test ./...
+
+  # The test job compiles with the runner's Go toolchain via setup-go + go.mod, so it
+  # never touches the Dockerfile. Until this job existed, a base-image bump was
+  # completely unvalidated by CI: golang 1.25 -> 1.27 (#13) merged green without the
+  # image ever being built, and would only have been exercised when someone cut a v*
+  # tag and build.yml ran -- i.e. at release time, not review time.
+  #
+  # Deliberately no paths filter. This repo produces exactly one image, so any change
+  # can affect it, and a filter that silently stops matching is how checks become
+  # inert without anyone noticing.
+  docker-build:
+    name: Docker Build
+    runs-on: ${{ vars.CI_RUNNER || 'vollminlab' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ci-build:${{ github.sha }}
+
+      # Building proves it compiles. It does not prove the result runs -- a toolchain
+      # or base-image change can produce a binary the final image cannot execute at
+      # all (wrong architecture, missing interpreter, binary not at the ENTRYPOINT
+      # path). The final stage is distroless with no shell, so the only way to check
+      # is to invoke the entrypoint itself.
+      - name: Verify the image can execute its entrypoint
+        run: |
+          set -uo pipefail
+          out=$(docker run --rm ci-build:${{ github.sha }} --help 2>&1); rc=$?
+          printf '%s\n' "$out" | head -20
+
+          # 125-127 mean Docker could not exec the binary at all. Any other code means
+          # the process started and chose its own exit -- Go's flag package exits 2 on
+          # --help, which is a pass, not a failure.
+          case "$rc" in
+            125|126|127)
+              echo "::error::image built but its entrypoint could not be executed (exit $rc)"
+              exit 1 ;;
+          esac
+          case "$out" in
+            *"exec format error"*|*"no such file or directory"*|*"cannot execute"*)
+              echo "::error::entrypoint present but not executable in the final image"
+              exit 1 ;;
+          esac
+          echo "entrypoint executed (exit $rc)"
