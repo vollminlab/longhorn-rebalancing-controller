@@ -89,7 +89,7 @@ volume shrink.
 ```mermaid
 flowchart LR
     R[rebalance<br/><i>maintenance window only<br/>2 moves per day, 30 min cooldown</i>]
-    S[steady-state<br/><i>any time of day<br/>5 moves per day, 10 min cooldown</i>]
+    S[steady-state<br/><i>maintenance window only<br/>5 moves per day, 10 min cooldown</i>]
     R -->|max node usage under 75%<br/>on 3 consecutive cycles| S
     S -->|max node usage reaches 82%<br/>threshold plus 7 point hysteresis| R
 ```
@@ -100,7 +100,14 @@ moves inside `rebalance.maintenanceWindow`. A move already in flight finishes ou
 
 **`steady-state`** prevents drift once balanced. It triggers on a ratio instead of an absolute:
 the most-loaded node holding more than `steadyState.imbalanceRatio` times the scheduled bytes of
-the least-loaded node. There is no maintenance window, so it reacts promptly to small drifts.
+the least-loaded node.
+
+Both modes start moves only inside `rebalance.maintenanceWindow`. Steady-state ignored it until
+2026-08-22, when the controller logged `outside maintenance window` at 01:15:58 and
+`starting surge-move (steady-state)` sixteen seconds later. A surge-move is a full replica
+rebuild, so the setting was being honoured by the mode that moves twice a day and ignored by the
+mode that moves five times — the opposite of the intent. The window name still lives under
+`rebalance` for config compatibility; it governs both.
 
 The revert edge carries a **7-percentage-point hysteresis** hard-coded as `revertHysteresis` in
 `rebalancer.go`. Graduating up requires dropping below 75%; falling back requires reaching 82%.
@@ -167,7 +174,7 @@ the state machine above.
 | 4 | `todayMoveFailures` below `move.maxFailuresPerDay` | `dryRun: false` |
 | 5 | Cooldown elapsed since the last move outcome | `dryRun: false` |
 | 6 | `todayEvictions` below the mode's `maxEvictionsPerDay` | `dryRun: false` |
-| 7 | Now is inside `rebalance.maintenanceWindow` | always, `rebalance` mode only |
+| 7 | Now is inside `rebalance.maintenanceWindow` | always, both modes |
 | 8 | `dryRun: false` | — the actual patch is skipped otherwise |
 
 Gate 1 tolerates `robustness: unknown`. Detached volumes report `unknown`, and treating that as
@@ -176,8 +183,8 @@ unhealthy meant a cluster with any detached volume could never rebalance at all.
 The `dryRun: false` column is not a footnote. **In dry-run the gates, the cooldown and the daily
 caps are all skipped** — dry-run deliberately shows you the decision it *would* reach from the
 current cluster state, unclamped by rate limits. The maintenance window is the exception: it
-applies in dry-run too, so in `rebalance` mode a dry-run pod only logs candidate moves between
-02:00 and 05:00.
+applies in dry-run too, so a dry-run pod only logs candidate moves between 02:00 and 05:00, in
+either mode.
 
 ## Longhorn resources read and written
 
@@ -297,8 +304,8 @@ Chart and app version are both **0.4.0**. The chart does not create the namespac
 ### Recommended rollout
 
 1. Deploy with `dryRun: true` — the chart default.
-2. Watch the logs for several days. In `rebalance` mode the interesting lines only appear inside
-   the maintenance window, so check the 02:00–05:00 logs specifically.
+2. Watch the logs for several days. The interesting lines only appear inside the maintenance
+   window in either mode, so check the 02:00–05:00 logs specifically.
 3. Set `dryRun: false` once the decisions look correct. No restart is needed; the next reconcile
    picks up the ConfigMap change.
 4. The controller starts in `rebalance` mode and moves replicas overnight, at most two per day.
