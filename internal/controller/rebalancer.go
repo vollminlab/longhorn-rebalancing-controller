@@ -491,6 +491,28 @@ func (r *RebalancingReconciler) evictSteadyState(
 ) (bool, error) {
 	log := ctrl.LoggerFrom(ctx)
 
+	// Steady-state honours the same window as evictRebalance. It did not until
+	// now, which is the whole of #20: maintenanceWindow exists to keep replica
+	// movement out of the nightly backup window, and this path ignored it while
+	// the eviction path above respected it. Its own log made that plain, seconds
+	// apart on 2026-08-22:
+	//
+	//   01:15:58 outside maintenance window
+	//   01:16:14 starting surge-move (steady-state)
+	//
+	// A surge-move is a full replica rebuild. Landing one inside the backup
+	// window is exactly what maintenanceWindow was added to prevent, and on this
+	// cluster it also lands on saturated storage — moves fired at 00:00 and
+	// 01:16 contributed to a datastore stall that took three nodes NotReady.
+	//
+	// Checked before the DryRun block, matching evictRebalance, so a dry run
+	// reports the same decision the real path would take.
+	window, _ := config.ParseWindow(cfg.Rebalance.MaintenanceWindow)
+	if !window.Contains(now) {
+		log.Info("outside maintenance window (steady-state)", "window", cfg.Rebalance.MaintenanceWindow)
+		return false, nil
+	}
+
 	if !cfg.DryRun {
 		cooldown := time.Duration(cfg.SteadyState.CooldownMinutes) * time.Minute
 		if !r.lastEvictionTime.IsZero() && now.Sub(r.lastEvictionTime) < cooldown {
