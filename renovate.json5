@@ -16,5 +16,26 @@
   "enabledManagers": ["gomod", "dockerfile", "github-actions"],
   // gomodTidy keeps go.sum consistent with the bumped go.mod inside the same PR;
   // without it a module update can land a go.sum the build then rejects.
-  "postUpdateOptions": ["gomodTidy"]
+  "postUpdateOptions": ["gomodTidy"],
+  "packageRules": [
+    {
+      // controller-runtime pins exact k8s.io/* versions -- v0.25.1's go.mod requires
+      // k8s.io/api v0.37.0 and k8s.io/client-go v0.37.0 precisely -- so it is part of
+      // the same upgrade as the kubernetes monorepo, not an independent dependency.
+      //
+      // config:recommended already groups k8s.io/* into one "kubernetes monorepo" PR,
+      // but sigs.k8s.io/controller-runtime sits outside that group, so Renovate raised
+      // the two separately. Both edit go.mod and go.sum, so merging either one leaves
+      // the other DIRTY and unmergeable until Renovate rebases it. That happened on
+      // 2026-09-17 in this repo and in the sibling controller repo.
+      //
+      // Grouping them means one PR that bumps both and is internally consistent.
+      "matchManagers": ["gomod"],
+      "matchPackageNames": [
+        "k8s.io/**",
+        "sigs.k8s.io/controller-runtime"
+      ],
+      "groupName": "kubernetes"
+    }
+  ]
 }
