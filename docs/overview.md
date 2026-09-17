@@ -16,7 +16,7 @@ Longhorn's built-in `replica-auto-balance: best-effort` counts replicas per node
 
 **`steady-state` mode** — prevents drift once balanced:
 - Triggers when most-loaded node has >1.5× the bytes of least-loaded node
-- No maintenance window restriction
+- Also restricted to `maintenanceWindow` (since 2026-08-26; it was unrestricted before)
 - Max 5 evictions/day, 10-minute cooldown
 
 ## Safety gates
@@ -27,7 +27,7 @@ All must hold before any eviction:
 2. No replica is currently `currentState == rebuilding`
 3. Cooldown period elapsed since last eviction
 4. Daily eviction count below cap
-5. Within maintenance window (rebalance mode only)
+5. Within maintenance window (both modes)
 6. `dryRun: false` in the ConfigMap
 
 ## Destination guards

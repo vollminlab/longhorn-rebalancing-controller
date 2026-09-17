@@ -422,3 +422,57 @@ func TestMaybeEvict_FailureCapBlocksNewMoves(t *testing.T) {
 		t.Fatalf("volume was surged (replicas=%d) despite the failure cap", got.Spec.NumberOfReplicas)
 	}
 }
+
+// TestEvictSteadyState_HonoursMaintenanceWindow: the steady-state surge-move path
+// ignored maintenanceWindow entirely, so on 2026-08-22 the controller logged
+// "outside maintenance window" at 01:15:58 and "starting surge-move
+// (steady-state)" 16 seconds later. Both branches are asserted, because a guard
+// that refuses everything looks identical to a correct one from the failing side.
+func TestEvictSteadyState_HonoursMaintenanceWindow(t *testing.T) {
+	day := time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name     string
+		now      time.Time
+		wantMove bool
+	}{
+		{"inside window", day.Add(14 * time.Hour), true},
+		{"outside window — the 01:16 move that prompted this", day.Add(76 * time.Minute), false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vol := mkVolume("pvc-a", 1)
+			r1 := mkNSReplica("pvc-a-r-1", "src", "pvc-a", 40*gib)
+			c := moveClient(t, vol, r1)
+			rec := &RebalancingReconciler{Client: c}
+
+			cfg := config.Default()
+			cfg.DryRun = false
+			cfg.Rebalance.MaintenanceWindow = "13:00-19:00"
+
+			stats := map[string]*nodeStats{
+				"src": mkStats(200*gib, 250*gib),
+				"dst": mkStats(20*gib, 250*gib),
+			}
+			stats["src"].replicas = []*lhv1b2.LonghornReplica{r1}
+
+			vols := &lhv1b2.LonghornVolumeList{Items: []lhv1b2.LonghornVolume{*vol}}
+			reps := &lhv1b2.LonghornReplicaList{Items: []lhv1b2.LonghornReplica{*r1}}
+
+			moved, err := rec.evictSteadyState(context.Background(), cfg, stats,
+				map[string]string{"pvc-a": "longhorn"}, allNodesEligible(stats),
+				map[string]map[string]struct{}{"pvc-a": {"src": {}}}, vols, reps, tc.now)
+			if err != nil {
+				t.Fatalf("evictSteadyState: %v", err)
+			}
+			if moved != tc.wantMove {
+				t.Fatalf("evictSteadyState = %v, want %v", moved, tc.wantMove)
+			}
+			surged := getVolume(t, c, "pvc-a").Spec.NumberOfReplicas != 1
+			if surged != tc.wantMove {
+				t.Fatalf("volume surged = %v, want %v", surged, tc.wantMove)
+			}
+		})
+	}
+}
