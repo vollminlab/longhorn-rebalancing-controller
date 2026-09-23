@@ -68,6 +68,22 @@
       "matchUpdateTypes": ["minor", "patch", "digest"],
       "automerge": true,
       "automergeType": "pr"
+    },
+    {
+      // The `kubernetes` group -- k8s.io/** plus controller-runtime -- stays MANUAL,
+      // overriding the non-major automerge rule above for these packages only.
+      //
+      // Renovate classifies controller-runtime 0.24.1 -> 0.25.1 as a *minor*, so it
+      // would otherwise automerge. That is not a safe default here: these bumps move
+      // the k8s client libraries, this repo already builds 3 minors ahead of the
+      // cluster (v0.37 libs vs a v1.34.8 cluster), and whether that should continue
+      // is an open decision in vollminlab/k8s-vollminlab-cluster#1280.
+      //
+      // Automerging them would settle that question by default, which is exactly the
+      // "accept silently" option #1280 rejects. Remove this rule once #1280 lands.
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["k8s.io/**", "sigs.k8s.io/controller-runtime"],
+      "automerge": false
     }
   ]
 }
