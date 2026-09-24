@@ -36,6 +36,54 @@
         "sigs.k8s.io/controller-runtime"
       ],
       "groupName": "kubernetes"
+    },
+    {
+      // GitHub Actions bumps are the one class where CI is *direct* proof rather than
+      // circumstantial: the workflow that validates the PR is itself the thing that
+      // runs the new action version. If checkout@v7 were broken, the run that would
+      // have to go green in order to automerge is the run that uses it.
+      //
+      // Measured 2026-09-17: 8 of 8 such PRs across the org were single-line `uses:`
+      // changes and all 8 passed. They were merged by hand, which is the waste this
+      // removes -- 38 dependency PRs arrived org-wide in the 7 days to 2026-09-21.
+      "matchManagers": ["github-actions"],
+      "automerge": true,
+      "automergeType": "pr"
+    },
+    {
+      // Non-major library updates, automerged only on green CI. This repo has a real
+      // test suite and a Docker build in the required checks, so "green" means the
+      // dependency was exercised, not merely resolved.
+      //
+      // MAJORS ARE DELIBERATELY EXCLUDED. Every dependency PR that needed human work
+      // in 2026-08/09 was a major -- react 19, vite 8, vitest 5, typescript 7,
+      // tailwind 4, jsdom 30. typescript 7 failed on TS2882 for a CSS side-effect
+      // import and vite 8 on a lockfile desync; no amount of green-CI gating would
+      // have made those safe, because they were not green.
+      //
+      // `dockerfile` is also excluded: a base-image bump changes the runtime under
+      // the application (python 3.12 -> 3.14, node 20 -> 24), and those deserve a
+      // look even when the tests pass.
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "automerge": true,
+      "automergeType": "pr"
+    },
+    {
+      // The `kubernetes` group -- k8s.io/** plus controller-runtime -- stays MANUAL,
+      // overriding the non-major automerge rule above for these packages only.
+      //
+      // Renovate classifies controller-runtime 0.24.1 -> 0.25.1 as a *minor*, so it
+      // would otherwise automerge. That is not a safe default here: these bumps move
+      // the k8s client libraries, this repo already builds 3 minors ahead of the
+      // cluster (v0.37 libs vs a v1.34.8 cluster), and whether that should continue
+      // is an open decision in vollminlab/k8s-vollminlab-cluster#1280.
+      //
+      // Automerging them would settle that question by default, which is exactly the
+      // "accept silently" option #1280 rejects. Remove this rule once #1280 lands.
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["k8s.io/**", "sigs.k8s.io/controller-runtime"],
+      "automerge": false
     }
   ]
 }
